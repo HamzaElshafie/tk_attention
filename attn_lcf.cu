@@ -60,6 +60,25 @@ struct attn_template {
         }
         args.num_iters = CEIL_DIV(args.globals.K.rows(), B_c);
     }
-    struct producer {};
+    struct producer {
+        __device__ static inline void setup(producer_setup_args<layout> args) {
+            warpgroup::producer_registers();
+        }
+        __device__ static inline void load(producer_load_args<layout> args) {
+            if (warpgroup::warpid() == 0) {
+                warp::tma::expect(args.inputs_arrived, args.input);
+                warp::tma::load_async(
+                    args.input.K, 
+                    args.globals.K, 
+                    {args.common.batch, args.common.head, args.iter, 0}, 
+                    args.inputs_arrived);
+                warp::tma::load_async(
+                    args.input.V, 
+                    args.globals.V, 
+                    {args.common.batch, args.common.head, args.iter, 0}, 
+                    args.inputs_arrived);
+            } else if(laneid() == 0) arrive(args.inputs_arrived);
+        }
+    };
     struct consumer {};
 };
