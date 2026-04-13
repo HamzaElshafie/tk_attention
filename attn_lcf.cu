@@ -44,12 +44,21 @@ struct attn_template {
     static constexpr int INPUT_PIPE_STAGES = 2;
     using layout = attn_layout<B_r, B_c, d_model, NUM_CONSUMER_WARPS/4>;
     __device__ static inline void common_setup (common_setup_args<layout> args) {
-        // How many tiles? Eg N=3072, B_r=64 -> 48 query tiles
-        int T_r = CEIL_DIV(args.globals.Q.rows(), B_r);
-        int T_c = CEIL_DIV(args.globals.K.rows(), B_c);
-        int q_rows_per_cta = (NUM_CONSUMER_WARPS/4) * B_r;
-        int total_cta_per_head = CEIL_DIV(args.globals.Q.rows(), q_rows_per_cta);
-        // TBC...
+        int q_rows_per_task = (NUM_CONSUMER_WARPS/4) * B_r;
+        int tasks_per_head = CEIL_DIV(args.globals.Q.rows(), q_rows_per_task);
+        int total_tasks = args.globals.Q.batch() * args.globals.Q.depth() * tasks_per_head;
+        int task_id = gridDim.x * args.task_iter + blockIdx.x;
+
+        if (task_id < total_tasks) {
+            args.common.batch = task_id / (tasks_per_head * args.globals.Q.depth());
+            args.common.head = (task_id % (tasks_per_head * args.globals.Q.depth())) / tasks_per_head;
+            int query_band = (task_id % (tasks_per_head * args.globals.Q.depth())) % tasks_per_head;
+            args.common.base_q_tile = query_band * (NUM_CONSUMER_WARPS/4);
+        } else {
+            args.num_iters = -1;
+            return;
+        }
+        args.num_iters = CEIL_DIV(args.globals.K.rows(), B_c);
     }
     struct producer {};
     struct consumer {};
