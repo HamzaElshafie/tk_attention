@@ -4,6 +4,19 @@ This repo benchmarks a simple ThunderKittens pipeline templated `lcf` (load-comp
 
 Importantly, I use seeded random BF16 Q/K/V tensors so the reported throughput is not inflated by predictable inputs like all zeros or all ones following the power throttling insights in [Strangely, Matrix Multiplications on GPUs Run Faster When Given "Predictable" Data!](https://www.thonking.ai/p/strangely-matrix-multiplications)
 
+<br>
+
+<p align="center">
+  <img 
+    width="800" 
+    height="450" 
+    alt="attention_bench" 
+    src="https://github.com/user-attachments/assets/6952d2c5-59fe-4053-b4a3-3f1fdab4e6a5" 
+  />
+</p>
+
+<br>
+
 ## 1) Environment
 
 Clone this repo and ThunderKittens:
