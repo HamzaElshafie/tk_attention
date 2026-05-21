@@ -125,7 +125,6 @@ struct attn_template {
             args.state.max_vec_last_scaled = args.state.max_vec * temperature_scale;
             warpgroup::mma_async_wait();
 
-            // Mask the tail of the final KV tile.
             warp::right_fill(
                 args.state.attn_score,
                 args.state.attn_score,
@@ -171,3 +170,220 @@ struct attn_template {
         }
     };
 };
+
+#ifdef ATTN_LCF_STANDALONE
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#ifndef ATTN_B
+#define ATTN_B 4
+#endif
+
+#ifndef ATTN_H
+#define ATTN_H 16
+#endif
+
+#ifndef ATTN_N
+#define ATTN_N 3072
+#endif
+
+#ifndef ATTN_D
+#define ATTN_D 128
+#endif
+
+#ifndef ATTN_B_R
+#define ATTN_B_R 64
+#endif
+
+#ifndef ATTN_B_C
+#define ATTN_B_C ((ATTN_D == 64) ? 192 : 128)
+#endif
+
+#ifndef ATTN_ITERS
+#define ATTN_ITERS 10
+#endif
+
+#define CUDA_CHECK(expr) cuda_check((expr), #expr, __FILE__, __LINE__)
+
+inline void cuda_check(cudaError_t err, const char *expr, const char *file, int line) {
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error at " << file << ":" << line
+                  << " while running " << expr << ": "
+                  << cudaGetErrorString(err) << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+template <typename T>
+class DeviceBuffer {
+public:
+    explicit DeviceBuffer(size_t count) : ptr_(nullptr) {
+        CUDA_CHECK(cudaMalloc(&ptr_, count * sizeof(T)));
+    }
+
+    ~DeviceBuffer() {
+        if (ptr_ != nullptr) {
+            cudaFree(ptr_);
+        }
+    }
+
+    DeviceBuffer(const DeviceBuffer&) = delete;
+    DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+
+    T *get() const {
+        return ptr_;
+    }
+
+private:
+    T *ptr_;
+};
+
+inline void read_tensor(std::ifstream &input, std::vector<float> &tensor, const char *name) {
+    for (float &value : tensor) {
+        if (!(input >> value)) {
+            throw std::runtime_error(std::string("Failed to read tensor ") + name);
+        }
+    }
+}
+
+inline int ceil_div_host(int value, int divisor) {
+    return (value + divisor - 1) / divisor;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        std::cerr << "Usage: " << argv[0] << " <reference-file.txt>" << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    constexpr int kBatch = ATTN_B;
+    constexpr int kHeads = ATTN_H;
+    constexpr int kSeq = ATTN_N;
+    constexpr int kDim = ATTN_D;
+    constexpr int kBr = ATTN_B_R;
+    constexpr int kBc = ATTN_B_C;
+    constexpr int kIters = ATTN_ITERS;
+    constexpr int kNumConsumerWarps = 12;
+    constexpr int kConsumerGroups = kNumConsumerWarps / 4;
+    constexpr int kElements = kBatch * kHeads * kSeq * kDim;
+    constexpr uint64_t kFlops =
+        2ull * kBatch * kHeads * kSeq * kSeq * kDim +
+        4ull * kBatch * kHeads * kSeq * kSeq +
+        2ull * kBatch * kHeads * kSeq * kSeq * kDim;
+
+    using kernel_template = attn_template<kBr, kBc, kDim>;
+    using layout = typename kernel_template::layout;
+
+    std::vector<float> q(kElements), k(kElements), v(kElements), o_ref(kElements), o(kElements);
+    std::vector<bf16> q_bf(kElements), k_bf(kElements), v_bf(kElements), o_bf(kElements);
+
+    std::ifstream input(argv[1]);
+    if (!input) {
+        std::cerr << "Could not open reference file: " << argv[1] << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    try {
+        read_tensor(input, q, "Q");
+        read_tensor(input, k, "K");
+        read_tensor(input, v, "V");
+        read_tensor(input, o_ref, "O_REF");
+    } catch (const std::exception &e) {
+        std::cerr << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    for (int i = 0; i < kElements; ++i) {
+        q_bf[i] = __float2bfloat16(q[i]);
+        k_bf[i] = __float2bfloat16(k[i]);
+        v_bf[i] = __float2bfloat16(v[i]);
+    }
+
+    DeviceBuffer<bf16> d_q(kElements), d_k(kElements), d_v(kElements), d_o(kElements);
+    CUDA_CHECK(cudaMemcpy(d_q.get(), q_bf.data(), kElements * sizeof(bf16), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_k.get(), k_bf.data(), kElements * sizeof(bf16), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_v.get(), v_bf.data(), kElements * sizeof(bf16), cudaMemcpyHostToDevice));
+
+    typename layout::qo_gl Qg(d_q.get(), static_cast<size_t>(kBatch), static_cast<size_t>(kHeads), static_cast<size_t>(kSeq), nullptr);
+    typename layout::qo_gl Og(d_o.get(), static_cast<size_t>(kBatch), static_cast<size_t>(kHeads), static_cast<size_t>(kSeq), nullptr);
+    typename layout::kv_gl Kg(d_k.get(), static_cast<size_t>(kBatch), static_cast<size_t>(kHeads), static_cast<size_t>(kSeq), nullptr);
+    typename layout::kv_gl Vg(d_v.get(), static_cast<size_t>(kBatch), static_cast<size_t>(kHeads), static_cast<size_t>(kSeq), nullptr);
+    typename layout::globals globals = {Qg, Og, Kg, Vg};
+
+    const unsigned long smem_size = kittens::MAX_SHARED_MEMORY - 2000;
+    CUDA_CHECK(cudaFuncSetAttribute(
+        prototype::lcf::kernel<kernel_template>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        smem_size
+    ));
+
+    cudaDeviceProp props{};
+    int device = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(cudaGetDeviceProperties(&props, device));
+
+    const int total_tasks = kBatch * kHeads * ceil_div_host(kSeq, kConsumerGroups * kBr);
+    const int grid_blocks = std::min(total_tasks, props.multiProcessorCount);
+    constexpr int block_size = prototype::detail::NUM_THREADS_v<kernel_template>;
+
+    std::cout << "Shape: B=" << kBatch << " H=" << kHeads << " N=" << kSeq << " D=" << kDim << '\n'
+              << "Tiles: B_r=" << kBr << " B_c=" << kBc << '\n'
+              << "Launch: grid=" << grid_blocks << " block=" << block_size
+              << " smem=" << smem_size << " bytes\n";
+
+    for (int i = 0; i < kIters; ++i) {
+        prototype::lcf::kernel<kernel_template><<<grid_blocks, block_size, smem_size>>>(globals);
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const auto start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < kIters; ++i) {
+        prototype::lcf::kernel<kernel_template><<<grid_blocks, block_size, smem_size>>>(globals);
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    const auto finish = std::chrono::high_resolution_clock::now();
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cudaMemcpy(o_bf.data(), d_o.get(), kElements * sizeof(bf16), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < kElements; ++i) {
+        o[i] = __bfloat162float(o_bf[i]);
+    }
+
+    double total_abs_diff = 0.0;
+    float max_abs_diff = 0.0f;
+    bool good = true;
+    for (int i = 0; i < kElements; ++i) {
+        const float diff = o[i] - o_ref[i];
+        const float abs_diff = std::abs(diff);
+        total_abs_diff += abs_diff;
+        max_abs_diff = std::max(max_abs_diff, abs_diff);
+        if (abs_diff > 0.01f || std::isnan(diff)) {
+            good = false;
+        }
+    }
+
+    const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count();
+    const double avg_us = static_cast<double>(elapsed_us) / kIters;
+    const double avg_s = avg_us * 1e-6;
+    const double tflops = (static_cast<double>(kFlops) / avg_s) / 1e12;
+
+    std::cout << std::fixed << std::setprecision(4)
+              << "Average abs diff: " << (total_abs_diff / kElements) << '\n'
+              << "Max abs diff:     " << max_abs_diff << '\n'
+              << "Average time:     " << avg_us << " us\n"
+              << "Throughput:       " << tflops << " TFLOP/s\n"
+              << (good ? "FWD Correct" : "FWD Incorrect") << std::endl;
+
+    return good ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+#endif

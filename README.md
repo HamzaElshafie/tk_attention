@@ -1,0 +1,151 @@
+# TK Attention Forward Benchmark
+
+This repo contains a ThunderKittens load-compute-finish forward attention kernel plus scripts to check correctness and benchmark it against FlashAttention-2 and FlashAttention-3.
+
+The benchmark is kernel-level, not model-level. It uses seeded random BF16 Q/K/V tensors so the reported throughput is not inflated by predictable inputs like all zeros or all ones.
+
+## 1) Environment
+
+Clone this repo and ThunderKittens:
+
+```bash
+git clone <this repo>
+git clone https://github.com/HazyResearch/ThunderKittens.git ~/ThunderKittens
+```
+
+Create a conda environment and install pinned Python dependencies:
+
+```bash
+conda create -n tk-attn python=3.12 -y
+conda activate tk-attn
+pip install -r requirements.txt
+```
+
+Set the CUDA and ThunderKittens paths:
+
+```bash
+export CUDA_HOME=/usr/local/cuda-12.8
+export PATH=${CUDA_HOME}/bin:${PATH}
+export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+export THUNDERKITTENS_ROOT=~/ThunderKittens
+```
+
+Verify the machine:
+
+```bash
+nvidia-smi
+nvcc --version
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name())"
+```
+
+FlashAttention-3 is optional. On Hopper, install it from the FlashAttention repo:
+
+```bash
+git clone https://github.com/Dao-AILab/flash-attention.git
+cd flash-attention/hopper
+python setup.py install
+export PYTHONPATH=$PWD:${PYTHONPATH}
+```
+
+FA3 requires H100/H800-class Hopper hardware and CUDA >= 12.3. CUDA 12.8 is preferred.
+
+## 2) Build TK Benchmark
+
+Build the TK attention benchmark executable:
+
+```bash
+mkdir -p build
+nvcc -std=c++17 -O3 -arch=sm_90a \
+  -I${THUNDERKITTENS_ROOT} \
+  -I${THUNDERKITTENS_ROOT}/include \
+  -I${THUNDERKITTENS_ROOT}/prototype \
+  bench_tk_attn.cu -o build/bench_tk_attn
+```
+
+The default benchmark build is for `D=128`, `B_r=64`, `B_c=128`. Override these at compile time if needed:
+
+```bash
+nvcc -std=c++17 -O3 -arch=sm_90a \
+  -DATTN_D=128 -DATTN_B_R=64 -DATTN_B_C=128 \
+  -I${THUNDERKITTENS_ROOT} \
+  -I${THUNDERKITTENS_ROOT}/include \
+  -I${THUNDERKITTENS_ROOT}/prototype \
+  bench_tk_attn.cu -o build/bench_tk_attn
+```
+
+## 3) Correctness Data
+
+Use `gentests.py` to generate PyTorch SDPA reference data for the standalone correctness harness in `attn_lcf.cu`:
+
+```bash
+python3 gentests.py randn --batch 4 --heads 16 --seq 3072 --dim 128
+```
+
+Available correctness cases:
+
+```text
+ones
+randn
+qk_test
+v_orientation
+```
+
+These cases are for debugging correctness and layout issues. (Taken from TK's repo)
+
+## 4) Benchmark
+
+Run a small smoke test first:
+
+```bash
+python3 bench_attention.py \
+  --batch 1 --heads 1 --seqs 128 --dim 128 \
+  --warmup 2 --iters 5 \
+  --tk-executable build/bench_tk_attn
+```
+
+Run the default non-causal BF16 attention benchmark:
+
+```bash
+python3 bench_attention.py \
+  --batch 16 --heads 16 --dim 128 \
+  --seqs 768 1536 3072 6144 12288 \
+  --warmup 20 --iters 100 \
+  --tk-executable build/bench_tk_attn \
+  --output-dir results
+```
+
+The benchmark compares:
+
+- `TK (Ours)`: `bench_tk_attn.cu`
+- `FlashAttention-2`: PyTorch SDPA forced to `SDPBackend.FLASH_ATTENTION`
+- `FlashAttention-3`: `flash_attn_interface.flash_attn_func` when installed
+
+Outputs:
+
+- `results/attention_bench.csv`: median/mean/min latency and TFLOP/s.
+- `results/attention_bench_meta.json`: GPU, CUDA/PyTorch, seed, shape, clock/power metadata when available.
+
+## 5) Plot
+
+Generate the grouped bar chart:
+
+```bash
+python3 plot_attention_bench.py \
+  --csv results/attention_bench.csv \
+  --output results/attention_bench.png \
+  --pdf
+```
+
+The plot uses median TFLOP/s:
+
+- TK: blue/teal
+- FlashAttention-2: green
+- FlashAttention-3: purple
+
+## 6) Reproducibility Notes
+
+- Use seeded random BF16 tensors for headline numbers.
+- Do not include allocation, tensor generation, file I/O, or plotting in timed regions.
+- Use warmups before timed iterations.
+- Report median TFLOP/s as the main number; keep mean/min in the CSV.
+- Keep `requirements.txt`, CUDA toolkit version, GPU type, power limit, and clock settings with benchmark results.

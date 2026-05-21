@@ -1,0 +1,17 @@
+# Python dependencies for the benchmark/control scripts.
+#
+# Recommended setup:
+#   conda create -n tk-attn python=3.12 -y
+#   conda activate tk-attn
+#   pip install -r requirements.txt
+#
+# This pins the CUDA 12.8 PyTorch wheel used for FA2 benchmarking. Keep the
+# system CUDA toolkit/nvcc aligned with the README build instructions.
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch==2.8.0+cu128
+numpy==2.2.6
+matplotlib==3.10.3
+packaging==25.0
+psutil==7.0.0
+ninja==1.11.1.4
