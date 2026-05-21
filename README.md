@@ -9,7 +9,7 @@ Importantly, I use seeded random BF16 Q/K/V tensors so the reported throughput i
 Clone this repo and ThunderKittens:
 
 ```bash
-git clone <this repo>
+git clone https://github.com/HamzaElshafie/tk_attention.git
 git clone https://github.com/HazyResearch/ThunderKittens.git ~/ThunderKittens
 ```
 
