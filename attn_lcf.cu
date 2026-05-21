@@ -11,6 +11,21 @@ using namespace kittens::prototype::lcf;
 
 #define CEIL_DIV(value, divisor) (((value) + (divisor) - 1) / (divisor))
 
+template <int D>
+__device__ __forceinline__ float attn_temperature_scale() {
+    return rsqrtf(static_cast<float>(D)) * 1.44269504089f;
+}
+
+template <>
+__device__ __forceinline__ float attn_temperature_scale<64>() {
+    return 0.125f * 1.44269504089f;
+}
+
+template <>
+__device__ __forceinline__ float attn_temperature_scale<128>() {
+    return 0.08838834764f * 1.44269504089f;
+}
+
 template <int B_r, int B_c, int d_model, int NUM_CONSUMER_WGS>
 struct attn_layout {
     using qo_tile = st_bf<B_r, d_model>;
@@ -31,6 +46,7 @@ struct attn_layout {
     struct common_state {int batch, head, base_q_tile;};
     struct consumer_state {
         col_vec<rt_fl<16, kv_tile::rows>> max_vec, norm_vec; // per-warp row stats for a local 16 x B_c score fragment
+        col_vec<rt_fl<16, kv_tile::rows>> max_vec_last_scaled, max_vec_scaled;
         rt_fl<16, qo_tile::cols> o_reg; // per-warp output accumulator fragment
         // current-iteration working buffers
         rt_fl<16, kv_tile::rows> attn_score;
@@ -52,8 +68,8 @@ struct attn_template {
         if (task_id < total_tasks) {
             args.common.batch = task_id / (tasks_per_head * args.globals.Q.depth());
             args.common.head = (task_id % (tasks_per_head * args.globals.Q.depth())) / tasks_per_head;
-            int query_band = (task_id % (tasks_per_head * args.globals.Q.depth())) % tasks_per_head;
-            args.common.base_q_tile = query_band * (NUM_CONSUMER_WARPS/4);
+            int query_band = (task_id % (tasks_per_head * args.globals.Q.depth())) % tasks_per_head; // CTA query-chunk index within (batch, head)
+            args.common.base_q_tile = query_band * (NUM_CONSUMER_WARPS/4); // first query tile index handled by this CTA
         } else {
             args.num_iters = -1;
             return;
@@ -62,10 +78,10 @@ struct attn_template {
     }
     struct producer {
         __device__ static inline void setup(producer_setup_args<layout> args) {
-            warpgroup::producer_registers();
+            warpgroup::producer_registers(); // deallocate registers
         }
         __device__ static inline void load(producer_load_args<layout> args) {
-            if (warpgroup::warpid() == 0) {
+            if (warpgroup::warpid() == 0) { // technically only one thread issues the load
                 warp::tma::expect(args.inputs_arrived, args.input);
                 warp::tma::load_async(
                     args.input.K, 
@@ -80,5 +96,78 @@ struct attn_template {
             } else if(laneid() == 0) arrive(args.inputs_arrived);
         }
     };
-    struct consumer {};
+    struct consumer {
+        __device__ static inline void setup(consumer_setup_args<layout> args) {
+            warpgroup::consumer_registers<NUM_CONSUMER_WARPS/4>(); // allocate more registers
+            // Query tile idx WG handles?
+            int q_tile_idx = args.common.base_q_tile + warpgroup::groupid();
+            if (q_tile_idx * layout::qo_tile::rows < args.globals.Q.rows()) {
+                warpgroup::load(
+                    args.scratch.Q[warpgroup::groupid()],
+                    args.globals.Q,
+                    {args.common.batch, args.common.head, q_tile_idx, 0}
+                );
+            }
+            // Initialise consumer WG running states
+            args.state.max_vec = base_types::constants<float>::neg_infty();
+            args.state.norm_vec = 0.0f;
+            args.state.o_reg = 0.0f;
+            warpgroup::sync(warpgroup::groupid());
+        }
+        __device__ static inline void compute(consumer_compute_args<layout> args) {
+            const float temperature_scale = attn_temperature_scale<d_model>();
+            // S = Q * K.T
+            warpgroup::mm<transpose::N, transpose::T>(
+                args.state.attn_score,
+                args.scratch.Q[warpgroup::groupid()],
+                args.input.K
+            );
+            args.state.max_vec_last_scaled = args.state.max_vec * temperature_scale;
+            warpgroup::mma_async_wait();
+
+            // Mask the tail of the final KV tile.
+            warp::right_fill(
+                args.state.attn_score,
+                args.state.attn_score,
+                args.globals.K.rows() - args.iter * B_c,
+                base_types::constants<float>::neg_infty()
+            );
+            args.state.max_vec = warp::max<axis::COL>(args.state.attn_score, args.state.max_vec);
+            args.state.max_vec_scaled = args.state.max_vec * temperature_scale;
+            args.state.attn_score = warp::exp2((args.state.attn_score * temperature_scale) - args.state.max_vec_scaled);
+            args.state.max_vec_last_scaled = warp::exp2(args.state.max_vec_last_scaled - args.state.max_vec_scaled);
+
+            args.state.norm_vec *= args.state.max_vec_last_scaled;
+            args.state.norm_vec = warp::sum<axis::COL>(args.state.attn_score, args.state.norm_vec);
+            args.state.o_reg *= args.state.max_vec_last_scaled;
+            args.state.bf16_attn_score = args.state.attn_score;
+
+            warpgroup::mma<transpose::N, transpose::N>(
+                args.state.o_reg,
+                args.state.bf16_attn_score,
+                args.input.V
+            );
+            warpgroup::mma_async_wait();
+            if (laneid() == 0) arrive(args.inputs_finished);
+        }
+        __device__ static inline void finish(consumer_finish_args<layout> args) {
+            int q_tile_idx = args.common.base_q_tile + warpgroup::groupid();
+            if (q_tile_idx * layout::qo_tile::rows < args.globals.Q.rows()) {
+                args.state.o_reg /= args.state.norm_vec;
+                auto &o_smem = reinterpret_cast<typename layout::qo_tile&>(args.scratch.Q[warpgroup::groupid()]);
+                warpgroup::store(o_smem, args.state.o_reg);
+                warpgroup::sync(warpgroup::groupid());
+                if (warpgroup::warpid() == 0) {
+                    warp::tma::store_async(
+                        args.globals.O,
+                        o_smem,
+                        {args.common.batch, args.common.head, q_tile_idx, 0}
+                    );
+                }
+                warp::tma::store_async_read_wait();
+            }
+            __syncwarp();
+            if (laneid() == 0) arrive(args.finish_finished);
+        }
+    };
 };
