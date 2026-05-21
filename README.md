@@ -55,24 +55,24 @@ Build the TK attention benchmark executable:
 
 ```bash
 mkdir -p build
-nvcc -std=c++20 -O3 -arch=sm_90a --expt-extended-lambda \
+nvcc -std=c++20 -O3 -arch=sm_90a --expt-extended-lambda --expt-relaxed-constexpr \
   -DKITTENS_SM90 \
   -I${THUNDERKITTENS_ROOT} \
   -I${THUNDERKITTENS_ROOT}/include \
   -I${THUNDERKITTENS_ROOT}/prototype \
-  bench_tk_attn.cu -o build/bench_tk_attn
+  bench_tk_attn.cu -lcuda -o build/bench_tk_attn
 ```
 
 The default benchmark build is for `D=128`, `B_r=64`, `B_c=128`. Override these at compile time if needed:
 
 ```bash
-nvcc -std=c++20 -O3 -arch=sm_90a --expt-extended-lambda \
+nvcc -std=c++20 -O3 -arch=sm_90a --expt-extended-lambda --expt-relaxed-constexpr \
   -DKITTENS_SM90 \
   -DATTN_D=128 -DATTN_B_R=64 -DATTN_B_C=128 \
   -I${THUNDERKITTENS_ROOT} \
   -I${THUNDERKITTENS_ROOT}/include \
   -I${THUNDERKITTENS_ROOT}/prototype \
-  bench_tk_attn.cu -o build/bench_tk_attn
+  bench_tk_attn.cu -lcuda -o build/bench_tk_attn
 ```
 
 ## 3) Correctness Data
@@ -139,7 +139,3 @@ python3 plot_attention_bench.py \
 ```
 
 The plot uses median TFLOP/s:
-
-- TK: blue/teal
-- FlashAttention-2: green
-- FlashAttention-3: purple
