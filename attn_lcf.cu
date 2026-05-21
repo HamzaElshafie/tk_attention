@@ -1,6 +1,5 @@
 #include "kittens.cuh"
 #include "prototype.cuh"
-#include "common.cuh"
 
 #include <iostream>
 #include <cuda_bf16.h>
