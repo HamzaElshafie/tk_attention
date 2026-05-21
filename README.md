@@ -1,4 +1,4 @@
-# TK Attention
+# TK LCF Attention
 
 This repo benchmarks a simple ThunderKittens pipeline templated `lcf` (load-compute-finish) forward attention kernel against FlashAttention-2 and FlashAttention-3.
 
@@ -12,6 +12,17 @@ Importantly, I use seeded random BF16 Q/K/V tensors so the reported throughput i
     height="450" 
     alt="attention_bench" 
     src="https://github.com/user-attachments/assets/6952d2c5-59fe-4053-b4a3-3f1fdab4e6a5" 
+  />
+</p>
+
+<br>
+
+<p align="center">
+  <img 
+    width="647" 
+    height="349" 
+    alt="nvidia-smi" 
+    src="https://github.com/user-attachments/assets/25536a1d-cdab-4589-8a25-e78dc8339971" 
   />
 </p>
 
