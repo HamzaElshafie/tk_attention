@@ -1,8 +1,8 @@
-# TK Attention Forward Benchmark
+# TK Attention
 
-This repo contains a ThunderKittens load-compute-finish forward attention kernel plus scripts to check correctness and benchmark it against FlashAttention-2 and FlashAttention-3.
+This repo benchmarks a simple ThunderKittens pipeline templated `lcf` (load-compute-finish) forward attention kernel against FlashAttention-2 and FlashAttention-3.
 
-The benchmark is kernel-level, not model-level. It uses seeded random BF16 Q/K/V tensors so the reported throughput is not inflated by predictable inputs like all zeros or all ones.
+Importantly, I use seeded random BF16 Q/K/V tensors so the reported throughput is not inflated by predictable inputs like all zeros or all ones following the power throttling insights in [Strangely, Matrix Multiplications on GPUs Run Faster When Given "Predictable" Data!](https://www.thonking.ai/p/strangely-matrix-multiplications)
 
 ## 1) Environment
 
@@ -38,7 +38,7 @@ nvcc --version
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name())"
 ```
 
-FlashAttention-3 is optional. On Hopper, install it from the FlashAttention repo:
+FlashAttention-3 is optional. Install it from the FlashAttention repo:
 
 ```bash
 git clone https://github.com/Dao-AILab/flash-attention.git
@@ -47,7 +47,7 @@ python setup.py install
 export PYTHONPATH=$PWD:${PYTHONPATH}
 ```
 
-FA3 requires H100/H800-class Hopper hardware and CUDA >= 12.3. CUDA 12.8 is preferred.
+FA3 requires H100 hardware and CUDA >= 12.3. CUDA 12.8 is preferred.
 
 ## 2) Build TK Benchmark
 
@@ -141,11 +141,3 @@ The plot uses median TFLOP/s:
 - TK: blue/teal
 - FlashAttention-2: green
 - FlashAttention-3: purple
-
-## 6) Reproducibility Notes
-
-- Use seeded random BF16 tensors for headline numbers.
-- Do not include allocation, tensor generation, file I/O, or plotting in timed regions.
-- Use warmups before timed iterations.
-- Report median TFLOP/s as the main number; keep mean/min in the CSV.
-- Keep `requirements.txt`, CUDA toolkit version, GPU type, power limit, and clock settings with benchmark results.
