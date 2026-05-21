@@ -24,15 +24,6 @@ pip install -r requirements.txt
 Set the CUDA and ThunderKittens paths:
 
 ```bash
-export CUDA_HOME=/usr/local/cuda-12.6
-export PATH=${CUDA_HOME}/bin:${PATH}
-export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
-export THUNDERKITTENS_ROOT=~/ThunderKittens
-```
-
-If your rented H100 image has a newer R570+ driver and CUDA 12.8 toolkit, use:
-
-```bash
 export CUDA_HOME=/usr/local/cuda-12.8
 export PATH=${CUDA_HOME}/bin:${PATH}
 export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
@@ -56,7 +47,7 @@ python setup.py install
 export PYTHONPATH=$PWD:${PYTHONPATH}
 ```
 
-FA3 requires H100/H800-class Hopper hardware and CUDA >= 12.3. CUDA 12.8 is preferred, but CUDA 12.6 is a reasonable default for images with an R560 driver.
+Use an H100/H800 Hopper image with an R570+ NVIDIA driver and CUDA 12.8 toolkit. Current ThunderKittens and FlashAttention-3 are much smoother on this stack than on CUDA 12.6/R560 images.
 
 ## 2) Build TK Benchmark
 
@@ -64,7 +55,7 @@ Build the TK attention benchmark executable:
 
 ```bash
 mkdir -p build
-nvcc -std=c++17 -O3 -arch=sm_90a \
+nvcc -std=c++20 -O3 -arch=sm_90a --expt-extended-lambda \
   -DKITTENS_SM90 \
   -I${THUNDERKITTENS_ROOT} \
   -I${THUNDERKITTENS_ROOT}/include \
@@ -75,7 +66,7 @@ nvcc -std=c++17 -O3 -arch=sm_90a \
 The default benchmark build is for `D=128`, `B_r=64`, `B_c=128`. Override these at compile time if needed:
 
 ```bash
-nvcc -std=c++17 -O3 -arch=sm_90a \
+nvcc -std=c++20 -O3 -arch=sm_90a --expt-extended-lambda \
   -DKITTENS_SM90 \
   -DATTN_D=128 -DATTN_B_R=64 -DATTN_B_C=128 \
   -I${THUNDERKITTENS_ROOT} \
