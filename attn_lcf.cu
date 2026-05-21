@@ -115,7 +115,7 @@ struct attn_template {
         }
         __device__ static inline void compute(consumer_compute_args<layout> args) {
             const float temperature_scale = attn_temperature_scale<d_model>();
-            // S = Q * K.T
+            // Sij = Qi * Kj.T
             warpgroup::mm<transpose::N, transpose::T>(
                 args.state.attn_score,
                 args.scratch.Q[warpgroup::groupid()],
@@ -130,13 +130,16 @@ struct attn_template {
                 args.globals.K.rows() - args.iter * B_c,
                 base_types::constants<float>::neg_infty()
             );
+            // Update running max (m_i)
             args.state.max_vec = warp::max<axis::COL>(args.state.attn_score, args.state.max_vec);
             args.state.max_vec_scaled = args.state.max_vec * temperature_scale;
+            // Compute current unnormalised softmax tile (P̃_ij)
             args.state.attn_score = warp::exp2((args.state.attn_score * temperature_scale) - args.state.max_vec_scaled);
+            // Update norm (l_i)
             args.state.max_vec_last_scaled = warp::exp2(args.state.max_vec_last_scaled - args.state.max_vec_scaled);
-
             args.state.norm_vec *= args.state.max_vec_last_scaled;
             args.state.norm_vec = warp::sum<axis::COL>(args.state.attn_score, args.state.norm_vec);
+            // Normalise (O_i)
             args.state.o_reg *= args.state.max_vec_last_scaled;
             args.state.bf16_attn_score = args.state.attn_score;
 
