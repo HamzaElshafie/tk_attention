@@ -4,6 +4,8 @@ This repo benchmarks a simple ThunderKittens pipeline templated `lcf` (load-comp
 
 Importantly, I use seeded random BF16 Q/K/V tensors so the reported throughput is not inflated by predictable inputs like all zeros or all ones following the power throttling insights in [Strangely, Matrix Multiplications on GPUs Run Faster When Given "Predictable" Data!](https://www.thonking.ai/p/strangely-matrix-multiplications)
 
+Blog: [Dissecting ThunderKittens: Anatomy of a Compact DSL for High-Performance AI Kernels](https://hamzaelshafie.bearblog.dev/dissecting-thunderkittens-anatomy-of-a-compact-dsl-for-high-performance-ai-kernels/)
+
 <br>
 
 <p align="center">
